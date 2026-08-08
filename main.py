@@ -14,15 +14,11 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
-    version="3.7.0"
+    version="3.7.6"
 )
 
-# Global Initialization
-RENDER_KEY = os.environ.get("GEMINI_API_KEY")
-if not RENDER_KEY:
-    raise ValueError("CRITICAL: GEMINI_API_KEY environment variable is missing on Render dashboard configuration panels!")
-
-ai_client = genai.Client(api_key=RENDER_KEY)  
+# Global Initialization - Secure architecture hooks cleanly into Render's Environment panel variables array
+ai_client = genai.Client()  
 
 class W2TaxData(BaseModel):
     box_a_ssn: Optional[str] = Field(None, description="Employee Social Security Number (format: XXX-XX-XXXX)")
@@ -62,16 +58,13 @@ def process_scanned_pdf_via_ocr(pdf_bytes: bytes) -> str:
     """Memory-optimized rasterization using PyMuPDF and lightweight Tesseract OCR."""
     flattened_text = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    
     for page in doc:
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.h, pix.w, pix.n))
         img_gray = cv2.cvtColor(img_data, cv2.COLOR_RGB2GRAY) if pix.n == 3 else img_data
-        
         text = pytesseract.image_to_string(img_gray)
         if text:
             flattened_text.append(text)
-                
     return " ".join(flattened_text)
 
 def llm_fallback_w2(text_context: str) -> W2TaxData:
@@ -108,7 +101,6 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
     container = SECContainer.model_validate_json(response.text)
     return container.rows
 
-# FIXED: Added root welcome route to eliminate the raw browser 'Not Found' 404 response
 @app.get("/")
 async def root():
     return {
@@ -122,7 +114,6 @@ async def root():
 async def parse_w2(file: UploadFile = File(...)):
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Supported payload type is strictly PDF.")
-        
     pdf_content = await file.read()
     raw_text_stream = ""
     engine_used = "Deterministic_Native"
@@ -137,7 +128,6 @@ async def parse_w2(file: UploadFile = File(...)):
                 for w in words:
                     top_rounded = int(w['top'] / tolerance) * tolerance
                     lines.setdefault(top_rounded, []).append(w)
-                
                 sorted_lines = []
                 for top in sorted(lines.keys()):
                     sorted_row = sorted(lines[top], key=lambda w: w['x0'])
@@ -162,11 +152,8 @@ async def parse_w2(file: UploadFile = File(...)):
     )
 
     if not extracted_data.box_1_wages or not extracted_data.box_2_federal_tax:
-        try:
-            extracted_data = llm_fallback_w2(raw_text_stream)
-            engine_used += " + LLM_Healing_Layer"
-        except Exception:
-            pass
+        extracted_data = llm_fallback_w2(raw_text_stream)
+        engine_used += " + LLM_Healing_Layer"
 
     return W2ParserResponse(
         status="success",
@@ -179,7 +166,6 @@ async def parse_w2(file: UploadFile = File(...)):
 async def parse_sec_10k(file: UploadFile = File(...)):
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Supported payload type is strictly PDF.")
-        
     pdf_content = await file.read()
     parsed_rows = []
     engine_used = "Tabular_Geometry"
@@ -194,9 +180,8 @@ async def parse_sec_10k(file: UploadFile = File(...)):
                         label = clean_row
                         if any(k in label.lower() for k in ["cash", "assets", "liabilities", "equity", "goodwill"]):
                             numeric_candidates = [clean_currency(c) for c in clean_row[1:] if clean_currency(c) is not None]
-                            current_val = numeric_candidates if len(numeric_candidates) > 0 else None
-                            prior_val = numeric_candidates if len(numeric_candidates) > 1 else None
-                            
+                            current_val = numeric_candidates[0] if len(numeric_candidates) > 0 else None
+                            prior_val = numeric_candidates[1] if len(numeric_candidates) > 1 else None
                             parsed_rows.append(SECBalanceSheetRow(
                                 line_item_name=label,
                                 current_year_value=current_val,
@@ -210,13 +195,7 @@ async def parse_sec_10k(file: UploadFile = File(...)):
         full_text_buffer = ""
         with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
             full_text_buffer = " ".join([p.extract_text() or "" for p in pdf.pages[:8]])
-        try:
-            parsed_rows = llm_fallback_sec(full_text_buffer)
-        except Exception as err:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
-                detail=f"All parsing extraction strategies exhausted: {str(err)}"
-            )
+        parsed_rows = llm_fallback_sec(full_text_buffer)
 
     return SECParserResponse(
         status="success",
