@@ -1,5 +1,11 @@
 import io
+import os
 import re
+from dotenv import load_dotenv
+
+# FIXED: Must execute environment hydration BEFORE initializing any cloud clients
+load_dotenv()
+
 import cv2
 import fitz  # PyMuPDF
 import pdfplumber
@@ -13,12 +19,10 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
-    version="3.6.0"
+    version="3.6.1"
 )
 
 # Global Initialization
-# SECURE: Initialized without hardcoded keys to pass GitHub scans.
-# Automatically reads GEMINI_API_KEY from Render's secret environment injection.
 ai_client = genai.Client()  
 
 class W2TaxData(BaseModel):
@@ -65,7 +69,6 @@ def process_scanned_pdf_via_ocr(pdf_bytes: bytes) -> str:
         img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.h, pix.w, pix.n))
         img_gray = cv2.cvtColor(img_data, cv2.COLOR_RGB2GRAY) if pix.n == 3 else img_data
         
-        # Lightweight Tesseract extraction loop (Sub-60MB RAM footprint)
         text = pytesseract.image_to_string(img_gray)
         if text:
             flattened_text.append(text)
