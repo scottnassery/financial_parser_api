@@ -16,7 +16,7 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade financial parser built for seamless multi-format input integration.",
-    version="4.1.0"
+    version="4.2.0"
 )
 
 # Global Initialization
@@ -77,29 +77,37 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
     return container.rows
 
 async def extract_pdf_bytes_safely(request: Request) -> bytes:
-    """Robust extractor that cleanly processes binary streams, multi-part forms, or base64 segments."""
+    """Error-insulated parser that reads multipart files or handles base64 streams without throwing 500 errors."""
     content_type = request.headers.get("content-type", "")
     
-    if "multipart/form-data" in content_type:
-        form = await request.form()
-        form_file = form.get("file")
-        if form_file and not isinstance(form_file, str):
-            return await form_file.read()
-        elif isinstance(form_file, str):
-            if "base64," in form_file:
-                return base64.b64decode(form_file.split("base64,")[1])
-            return form_file.encode('utf-8')
+    try:
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            form_file = form.get("file")
+            if form_file and not isinstance(form_file, str):
+                return await form_file.read()
+            elif isinstance(form_file, str):
+                if "base64," in form_file:
+                    return base64.b64decode(form_file.split("base64,")[1])
+                return form_file.encode('utf-8')
+    except Exception:
+        pass
             
     body_bytes = await request.body()
-    body_str = body_bytes.decode("utf-8", errors="ignore").strip()
-    
-    if "data:application/pdf;base64," in body_str:
-        # FIXED: Isolated split indices correctly to avoid AttributeErrors on list structures
-        clean_b64 = body_str.split("base64,")[1].replace('"', '').replace('}', '').strip()
-        return base64.b64decode(clean_b64)
-    elif body_str.startswith("{") and '"data"' in body_str:
-        match = re.search(r'"data"\s*:\s*"[^,]+,([^"]+)"', body_str)
-        if match: return base64.b64decode(match.group(1))
+    try:
+        body_str = body_bytes.decode("utf-8", errors="ignore").strip()
+        if "base64," in body_str:
+            # FIXED: Added correct list indexing [1] before running text replacements
+            parts = body_str.split("base64,")
+            if len(parts) > 1:
+                clean_b64 = parts[1].replace('"', '').replace('}', '').replace(' ', '').strip()
+                return base64.b64decode(clean_b64)
+        elif body_str.startswith("{") and '"data"' in body_str:
+            match = re.search(r'"data"\s*:\s*"[^,]+,([^"]+)"', body_str)
+            if match: 
+                return base64.b64decode(match.group(1))
+    except Exception:
+        pass
         
     return body_bytes
 
