@@ -8,13 +8,12 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from paddleocr import PaddleOCR
-from google import genai
-from google.genai import types
+from google import genai  # FIXED: Removed the old 'import types' line to avoid crash
 
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, zero-retention document parser with automated LLM schema healing.",
-    version="3.4.0"
+    version="3.5.0"
 )
 
 # Global Initializations
@@ -81,18 +80,22 @@ def process_scanned_pdf_via_ocr(pdf_bytes: bytes) -> str:
                 
     return " ".join(flattened_text)
 
+# =====================================================================
+# PLACEMENT WINDOW: Updated Google-GenAI 1.17.0 Fallback Handlers
+# =====================================================================
 def llm_fallback_w2(text_context: str) -> W2TaxData:
     """Uses structured schema enforcement to heal parsing anomalies instantly."""
     truncated_context = text_context[:8000]
     prompt = f"Extract W-2 tax variables exactly as specified by the schema from this raw text content: {truncated_context}"
+    
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=W2TaxData,
-            temperature=0.0
-        ),
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": W2TaxData,
+            "temperature": 0.0
+        }
     )
     return W2TaxData.model_validate_json(response.text)
 
@@ -102,18 +105,20 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
         rows: List[SECBalanceSheetRow]
 
     truncated_context = text_context[:25000]
-    prompt = f"Locate the balance sheet statements and extract the line items, matching current and prior years: {text_context}"
+    prompt = f"Locate the balance sheet statements and extract the line items, matching current and prior years: {truncated_context}"
+    
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=SECContainer,
-            temperature=0.0
-        ),
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": SECContainer,
+            "temperature": 0.0
+        }
     )
     container = SECContainer.model_validate_json(response.text)
     return container.rows
+# =====================================================================
 
 @app.post("/v1/parse/w2", response_model=W2ParserResponse)
 async def parse_w2(file: UploadFile = File(...)):
@@ -190,7 +195,6 @@ async def parse_sec_10k(file: UploadFile = File(...)):
                     if len(clean_row) >= 2:
                         label = clean_row[0]
                         if any(k in label.lower() for k in ["cash", "assets", "liabilities", "equity", "goodwill"]):
-                            # FIX: Completed the array conditional closure safely
                             numeric_candidates = [clean_currency(c) for c in clean_row[1:] if clean_currency(c) is not None]
                             current_val = numeric_candidates[0] if len(numeric_candidates) > 0 else None
                             prior_val = numeric_candidates[1] if len(numeric_candidates) > 1 else None
