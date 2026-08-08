@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system dependencies required by OpenCV and Tesseract OCR
+# Install lightweight system dependencies for OpenCV and Tesseract OCR
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libgl1 \
@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Upgrade pip first to reduce memory allocation during installations
+RUN pip install --no-cache-dir --upgrade pip
+
+# Copy and install packages sequentially to respect Render's RAM limits
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
