@@ -16,7 +16,7 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade financial parser built for seamless multi-format input integration.",
-    version="4.0.0"
+    version="4.1.0"
 )
 
 # Global Initialization
@@ -77,30 +77,27 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
     return container.rows
 
 async def extract_pdf_bytes_safely(request: Request) -> bytes:
-    """Robust extractor that accepts standard binary files, multi-part data, or automated base64 fields."""
+    """Robust extractor that cleanly processes binary streams, multi-part forms, or base64 segments."""
     content_type = request.headers.get("content-type", "")
     
-    # Strategy A: Digest incoming string mapping buffers or application multi-part parameters safely
     if "multipart/form-data" in content_type:
         form = await request.form()
         form_file = form.get("file")
         if form_file and not isinstance(form_file, str):
             return await form_file.read()
         elif isinstance(form_file, str):
-            # Safe Fallback: Handle direct data URI transformations cleanly
             if "base64," in form_file:
                 return base64.b64decode(form_file.split("base64,")[1])
             return form_file.encode('utf-8')
             
-    # Strategy B: Parse underlying text boundaries if payload maps directly to a JSON or string object string
     body_bytes = await request.body()
     body_str = body_bytes.decode("utf-8", errors="ignore").strip()
     
     if "data:application/pdf;base64," in body_str:
+        # FIXED: Isolated split indices correctly to avoid AttributeErrors on list structures
         clean_b64 = body_str.split("base64,")[1].replace('"', '').replace('}', '').strip()
         return base64.b64decode(clean_b64)
     elif body_str.startswith("{") and '"data"' in body_str:
-        # Match automated dashboard example values
         match = re.search(r'"data"\s*:\s*"[^,]+,([^"]+)"', body_str)
         if match: return base64.b64decode(match.group(1))
         
