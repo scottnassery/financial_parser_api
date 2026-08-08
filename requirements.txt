@@ -7,3 +7,4 @@ pytesseract==0.3.13
 opencv-python-headless==4.10.0.84
 google-genai==1.17.0
 python-multipart==0.0.12
+python-dotenv==1.0.1
