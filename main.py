@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import cv2
 import fitz  # PyMuPDF
@@ -13,11 +14,15 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
-    version="3.6.2"
+    version="3.6.3"
 )
 
-# Global Initialization - Natively inherits GEMINI_API_KEY from environment variables
-ai_client = genai.Client()  
+# FIXED: Explicit environment lookup resolves internal container variable mapping issues
+RENDER_KEY = os.environ.get("GEMINI_API_KEY")
+if not RENDER_KEY:
+    raise ValueError("CRITICAL: GEMINI_API_KEY environment variable is missing on Render dashboard configuration panels!")
+
+ai_client = genai.Client(api_key=RENDER_KEY)  
 
 class W2TaxData(BaseModel):
     box_a_ssn: Optional[str] = Field(None, description="Employee Social Security Number (format: XXX-XX-XXXX)")
