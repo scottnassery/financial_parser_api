@@ -1,7 +1,13 @@
 import io
 import os
 import re
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import cv2
+import base64
+import fitz  # PyMuPDF
+import pdfplumber
+import numpy as np
+import pytesseract
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -9,11 +15,11 @@ from google import genai
 
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
-    description="Production-grade financial document processing engine.",
-    version="6.0.0"
+    description="Adaptive, boundary-insulated document parsing pipeline engine.",
+    version="6.5.0"
 )
 
-# Global Client Initialization
+# Global Initialization
 CUSTOM_KEY = os.environ.get("CUSTOM_GEMINI_TOKEN")
 ai_client = genai.Client(api_key=CUSTOM_KEY) if CUSTOM_KEY else None
 
@@ -40,14 +46,8 @@ def clean_currency(val: Optional[str]) -> Optional[float]:
         return None
 
 def process_scanned_pdf_via_ocr_safe(pdf_bytes: bytes) -> str:
-    """Failsafe OCR parser wrapped in a secure block to eliminate container crashes."""
     fallback_text = ""
     try:
-        import fitz
-        import cv2
-        import numpy as np
-        import pytesseract
-        
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for page in doc:
             try:
@@ -59,8 +59,8 @@ def process_scanned_pdf_via_ocr_safe(pdf_bytes: bytes) -> str:
                     fallback_text += " " + text
             except Exception:
                 continue
-    except Exception as e:
-        return f"OCR execution bypassed due to native dependency check: {str(e)}"
+    except Exception:
+        pass
     return fallback_text
 
 def llm_fallback_w2(text_context: str) -> W2TaxData:
@@ -72,11 +72,7 @@ def llm_fallback_w2(text_context: str) -> W2TaxData:
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": W2TaxData,
-                "temperature": 0.0
-            }
+            config={"response_mime_type": "application/json", "response_schema": W2TaxData, "temperature": 0.0}
         )
         return W2TaxData.model_validate_json(response.text)
     except Exception:
@@ -93,33 +89,71 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": SECContainer,
-                "temperature": 0.0
-            }
+            config={"response_mime_type": "application/json", "response_schema": SECContainer, "temperature": 0.0}
         )
         container = SECContainer.model_validate_json(response.text)
         return container.rows
     except Exception:
         return []
 
+async def extract_pdf_bytes_safely(request: Request) -> bytes:
+    """Insulated extractor that intercept raw request streams natively to bypass proxy parameter wrapping."""
+    content_type = request.headers.get("content-type", "")
+    
+    # Check if incoming request is structured as multipart/form-data
+    if "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            form_file = form.get("file")
+            if form_file and not isinstance(form_file, str):
+                return await form_file.read()
+            elif isinstance(form_file, str):
+                # Handle text-wrapped base64 injections passed by proxy testing tools
+                if "base64," in form_file:
+                    return base64.b64decode(form_file.split("base64,")[1].strip())
+                return form_file.encode('utf-8')
+        except Exception:
+            pass
+            
+    # Read the raw request body directly if form-data parsing is bypassed or corrupted
+    body_bytes = await request.body()
+    body_str = body_bytes.decode("utf-8", errors="ignore").strip()
+    
+    # Regex capture to catch base64 wrappers anywhere inside the raw incoming text data payload
+    if "base64," in body_str:
+        try:
+            match = re.search(r'base64\s*,\s*([A-Za-z0-9+/=\s\n\r]+)', body_str)
+            if match:
+                clean_b64 = re.sub(r'[^A-Za-z0-9+/=]', '', match.group(1))
+                return base64.b64decode(clean_b64)
+        except Exception:
+            pass
+            
+    # Match JSON-wrapped keys injected by automated test platforms
+    if body_str.startswith("{"):
+        try:
+            match = re.search(r'"data"\s*:\s*"[^,]+,([^"]+)"', body_str)
+            if match: 
+                return base64.b64decode(match.group(1))
+        except Exception:
+            pass
+            
+    return body_bytes
+
 @app.get("/")
 async def root():
-    return {"status": "healthy", "service": "Turnkey Document Parser Engine"}
+    return {"status": "healthy", "service": "Turnkey Adaptive Financial Document Parser"}
 
 @app.post("/v1/parse/w2")
-async def parse_w2(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Supported payload type is strictly PDF.")
+async def parse_w2(request: Request):
+    pdf_content = await extract_pdf_bytes_safely(request)
+    if not pdf_content or len(pdf_content) < 100:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Failed to resolve valid PDF bytes from request payload."})
         
-    pdf_content = await file.read()
     raw_text_stream = ""
     engine_used = "Deterministic_Native"
     
-    # Isolated Extraction Block
     try:
-        import pdfplumber
         with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
             all_pages_text = []
             for page in pdf.pages:
@@ -155,7 +189,6 @@ async def parse_w2(file: UploadFile = File(...)):
         box_2_federal_tax=clean_currency(fed_tax_match.group(1)) if fed_tax_match else None
     )
 
-    # Safe Fallback Escalation Layer
     if not extracted_data.box_1_wages or not extracted_data.box_2_federal_tax:
         if ai_client:
             extracted_data = llm_fallback_w2(raw_text_stream)
@@ -169,17 +202,15 @@ async def parse_w2(file: UploadFile = File(...)):
     })
 
 @app.post("/v1/parse/sec-10k")
-async def parse_sec_10k(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Supported payload type is strictly PDF.")
+async def parse_sec_10k(request: Request):
+    pdf_content = await extract_pdf_bytes_safely(request)
+    if not pdf_content or len(pdf_content) < 100:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Failed to resolve valid PDF bytes from request payload."})
         
-    pdf_content = await file.read()
     parsed_rows = []
     engine_used = "Tabular_Geometry"
     
-    # Isolated Table Extraction Block
     try:
-        import pdfplumber
         with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
             for page in pdf.pages[:8]:  
                 tables = page.extract_tables()
@@ -198,22 +229,4 @@ async def parse_sec_10k(file: UploadFile = File(...)):
     except Exception:
         pass
 
-    # Safe Fallback Escalation Layer
     if not parsed_rows:
-        engine_used = "Semantic_LLM_Table_Extraction"
-        full_text_buffer = "Bypassed native layers due to layout anomalies."
-        try:
-            import pdfplumber
-            with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
-                full_text_buffer = " ".join([p.extract_text() or "" for p in pdf.pages[:8]])
-        except Exception:
-            pass
-            
-        if ai_client:
-            parsed_rows = llm_fallback_sec(full_text_buffer)
-
-    return JSONResponse(status_code=200, content={
-        "status": "success",
-        "extraction_engine": engine_used,
-        "balance_sheet": [row.model_dump() for row in parsed_rows]
-    })
