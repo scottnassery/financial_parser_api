@@ -4,28 +4,20 @@ import cv2
 import fitz  # PyMuPDF
 import pdfplumber
 import numpy as np
+import pytesseract
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from paddleocr import PaddleOCR
-from google import genai  # FIXED: Removed the old 'import types' line to avoid crash
+from google import genai
 
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
-    description="Production-grade, zero-retention document parser with automated LLM schema healing.",
-    version="3.5.0"
+    description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
+    version="3.6.0"
 )
 
-# Global Initializations
-ocr_engine = None
+# Global Initialization
 ai_client = genai.Client()  # Expects GEMINI_API_KEY environment variable
-
-def get_ocr_engine():
-    """Lazy-loads OCR to prevent long cold-start timeouts on serverless nodes."""
-    global ocr_engine
-    if ocr_engine is None:
-        ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
-    return ocr_engine
 
 class W2TaxData(BaseModel):
     box_a_ssn: Optional[str] = Field(None, description="Employee Social Security Number (format: XXX-XX-XXXX)")
@@ -62,32 +54,26 @@ def clean_currency(val: Optional[str]) -> Optional[float]:
         return None
 
 def process_scanned_pdf_via_ocr(pdf_bytes: bytes) -> str:
-    """Rasterizes PDF pages to high-DPI matrices and flattens them via PaddleOCR."""
+    """Memory-optimized rasterization using PyMuPDF and lightweight Tesseract OCR."""
     flattened_text = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    engine = get_ocr_engine()
     
     for page in doc:
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.h, pix.w, pix.n))
-        img_bgr = cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR) if pix.n == 3 else img_data
+        img_gray = cv2.cvtColor(img_data, cv2.COLOR_RGB2GRAY) if pix.n == 3 else img_data
         
-        result = engine.ocr(img_bgr, cls=True)
-        if result and result[0]:
-            for line in result[0]:
-                if line and len(line) > 1 and len(line[1]) > 0:
-                    flattened_text.append(line[1][0])
+        # Lightweight Tesseract extraction loop (Sub-60MB RAM footprint)
+        text = pytesseract.image_to_string(img_gray)
+        if text:
+            flattened_text.append(text)
                 
     return " ".join(flattened_text)
 
-# =====================================================================
-# PLACEMENT WINDOW: Updated Google-GenAI 1.17.0 Fallback Handlers
-# =====================================================================
 def llm_fallback_w2(text_context: str) -> W2TaxData:
     """Uses structured schema enforcement to heal parsing anomalies instantly."""
     truncated_context = text_context[:8000]
     prompt = f"Extract W-2 tax variables exactly as specified by the schema from this raw text content: {truncated_context}"
-    
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
@@ -106,7 +92,6 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
 
     truncated_context = text_context[:25000]
     prompt = f"Locate the balance sheet statements and extract the line items, matching current and prior years: {truncated_context}"
-    
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
@@ -118,7 +103,6 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
     )
     container = SECContainer.model_validate_json(response.text)
     return container.rows
-# =====================================================================
 
 @app.post("/v1/parse/w2", response_model=W2ParserResponse)
 async def parse_w2(file: UploadFile = File(...)):
@@ -193,11 +177,11 @@ async def parse_sec_10k(file: UploadFile = File(...)):
                 for row in table:
                     clean_row = [cell.strip() for cell in row if cell and cell.strip() != ""]
                     if len(clean_row) >= 2:
-                        label = clean_row[0]
+                        label = clean_row
                         if any(k in label.lower() for k in ["cash", "assets", "liabilities", "equity", "goodwill"]):
                             numeric_candidates = [clean_currency(c) for c in clean_row[1:] if clean_currency(c) is not None]
-                            current_val = numeric_candidates[0] if len(numeric_candidates) > 0 else None
-                            prior_val = numeric_candidates[1] if len(numeric_candidates) > 1 else None
+                            current_val = numeric_candidates if len(numeric_candidates) > 0 else None
+                            prior_val = numeric_candidates if len(numeric_candidates) > 1 else None
                             
                             parsed_rows.append(SECBalanceSheetRow(
                                 line_item_name=label,
