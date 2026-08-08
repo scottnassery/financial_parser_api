@@ -14,10 +14,10 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
-    version="3.6.3"
+    version="3.7.0"
 )
 
-# FIXED: Explicit environment lookup resolves internal container variable mapping issues
+# Global Initialization
 RENDER_KEY = os.environ.get("GEMINI_API_KEY")
 if not RENDER_KEY:
     raise ValueError("CRITICAL: GEMINI_API_KEY environment variable is missing on Render dashboard configuration panels!")
@@ -107,6 +107,16 @@ def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
     )
     container = SECContainer.model_validate_json(response.text)
     return container.rows
+
+# FIXED: Added root welcome route to eliminate the raw browser 'Not Found' 404 response
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "service": "Enterprise Financial Document Extraction API",
+        "environment": "production",
+        "documentation_url": "/docs"
+    }
 
 @app.post("/v1/parse/w2", response_model=W2ParserResponse)
 async def parse_w2(file: UploadFile = File(...)):
