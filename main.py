@@ -17,7 +17,9 @@ app = FastAPI(
 )
 
 # Global Initialization
-ai_client = genai.Client()  # Expects GEMINI_API_KEY environment variable
+# SECURE: Initialized without hardcoded keys to pass GitHub scans.
+# Automatically reads GEMINI_API_KEY from Render's secret environment injection.
+ai_client = genai.Client()  
 
 class W2TaxData(BaseModel):
     box_a_ssn: Optional[str] = Field(None, description="Employee Social Security Number (format: XXX-XX-XXXX)")
