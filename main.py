@@ -1,11 +1,5 @@
 import io
-import os
 import re
-from dotenv import load_dotenv
-
-# FIXED: Must execute environment hydration BEFORE initializing any cloud clients
-load_dotenv()
-
 import cv2
 import fitz  # PyMuPDF
 import pdfplumber
@@ -19,10 +13,10 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Production-grade, memory-optimized document parser with automated LLM schema healing.",
-    version="3.6.1"
+    version="3.6.2"
 )
 
-# Global Initialization
+# Global Initialization - Natively inherits GEMINI_API_KEY from environment variables
 ai_client = genai.Client()  
 
 class W2TaxData(BaseModel):
