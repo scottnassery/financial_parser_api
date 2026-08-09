@@ -2,7 +2,7 @@ import io
 import os
 import re
 import cv2
-import base64  # FIXED: Absolute import prevents runtime NameErrors
+import base64
 import fitz  # PyMuPDF
 import pdfplumber
 import numpy as np
@@ -16,7 +16,7 @@ from google import genai
 app = FastAPI(
     title="Enterprise Financial Document Extraction API",
     description="Adaptive, boundary-insulated document parsing pipeline engine.",
-    version="6.5.1"
+    version="6.5.2"
 )
 
 # Global Initialization
@@ -63,41 +63,7 @@ def process_scanned_pdf_via_ocr_safe(pdf_bytes: bytes) -> str:
         pass
     return fallback_text
 
-def llm_fallback_w2(text_context: str) -> W2TaxData:
-    if not ai_client: 
-        return W2TaxData()
-    try:
-        truncated_context = text_context[:8000]
-        prompt = f"Extract W-2 tax variables exactly as specified by the schema from this raw text content: {truncated_context}"
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={"response_mime_type": "application/json", "response_schema": W2TaxData, "temperature": 0.0}
-        )
-        return W2TaxData.model_validate_json(response.text)
-    except Exception:
-        return W2TaxData()
-
-def llm_fallback_sec(text_context: str) -> List[SECBalanceSheetRow]:
-    if not ai_client: 
-        return []
-    class SECContainer(BaseModel):
-        rows: List[SECBalanceSheetRow]
-    try:
-        truncated_context = text_context[:25000]
-        prompt = f"Locate the balance sheet statements and extract the line items, matching current and prior years: {truncated_context}"
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={"response_mime_type": "application/json", "response_schema": SECContainer, "temperature": 0.0}
-        )
-        container = SECContainer.model_validate_json(response.text)
-        return container.rows
-    except Exception:
-        return []
-
 async def extract_pdf_bytes_safely(request: Request) -> bytes:
-    """Insulated extractor that intercepts raw request streams natively."""
     content_type = request.headers.get("content-type", "")
     
     if "multipart/form-data" in content_type:
@@ -106,9 +72,10 @@ async def extract_pdf_bytes_safely(request: Request) -> bytes:
             form_file = form.get("file")
             if form_file and not isinstance(form_file, str):
                 return await form_file.read()
-            elif isinstance(form_file, str):
-                if "base64," in form_file:
-                    return base64.b64decode(form_file.split("base64,")[1].strip())
+            elif isinstance(form_file, str) and "base64," in form_file:
+                parts = form_file.split("base64,")
+                if len(parts) > 1:
+                    return base64.b64decode(parts[1].strip())
                 return form_file.encode('utf-8')
         except Exception:
             pass
@@ -186,8 +153,14 @@ async def parse_w2(request: Request):
 
     if not extracted_data.box_1_wages or not extracted_data.box_2_federal_tax:
         if ai_client:
-            extracted_data = llm_fallback_w2(raw_text_stream)
-            engine_used += " + LLM_Healing_Layer"
+            try:
+                prompt = f"Extract W-2 tax variables matching the schema from this raw text: {raw_text_stream[:8000]}"
+                # 👑 FIXED: Updated to standard active production model (gemini-2.0-flash)
+                response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt, config={"response_mime_type": "application/json", "response_schema": W2TaxData, "temperature": 0.0})
+                extracted_data = W2TaxData.model_validate_json(response.text)
+                engine_used += " + LLM_Healing_Layer"
+            except Exception:
+                pass
 
     return JSONResponse(status_code=200, content={
         "status": "success",
@@ -234,5 +207,17 @@ async def parse_sec_10k(request: Request):
             pass
             
         if ai_client:
-            parsed_rows = llm_fallback_sec(full_text_buffer)
+            try:
+                class SECContainer(BaseModel): rows: List[SECBalanceSheetRow]
+                prompt = f"Extract balance sheet items matching the schema from this text: {full_text_buffer[:25000]}"
+                # 👑 FIXED: Updated to standard active production model (gemini-2.0-flash)
+                response = ai_client.models.generate_content(model='gemini-2.0-flash', contents=prompt, config={"response_mime_type": "application/json", "response_schema": SECContainer, "temperature": 0.0})
+                parsed_rows = SECContainer.model_validate_json(response.text).rows
+            except Exception:
+                pass
 
+    return JSONResponse(status_code=200, content={
+        "status": "success",
+        "extraction_engine": engine_used,
+        "balance_sheet": [row.model_dump() for row in parsed_rows]
+    })
